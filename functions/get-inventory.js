@@ -1,44 +1,53 @@
 // functions/get-inventory.js
 exports.handler = async function(event, context) {
-    const machineId = process.env.MACHINE_ID;
+    const { machine_id } = event.queryStringParameters;
     const apiToken = process.env.API_TOKEN;
 
-    // Helper function to make authenticated API calls
-    const fetchAPI = async (url) => {
-        const response = await fetch(url, {
-            headers: { 'Authorization': apiToken, 'Content-Type': 'application/json' }
-        });
-        if (!response.ok) {
-            throw new Error(`API call failed: ${response.statusText}`);
-        }
-        return response.json();
-    };
+    if (!machine_id) {
+        return { statusCode: 400, body: JSON.stringify({ error: 'Keine machine_id übergeben.' }) };
+    }
+
+    const inventoryUrl = `https://cloud.vendon.net/rest/v1.7.0/stats/inventoryReport?machine_id=${machine_id}`;
+    const productDataUrl = `https://cloud.vendon.net/rest/v1.7.0/stock?machine_id=${machine_id}`;
 
     try {
-        // 1. Fetch product details (for max capacity)
-        const productsUrl = `https://cloud.vendon.net/rest/v1.7.0/products?machine_id=${machineId}&limit=200`;
-        const productsData = await fetchAPI(productsUrl);
-        
-        const productDetails = {};
-        if (productsData && productsData.result) {
-            productsData.result.forEach(p => {
-                productDetails[p.name] = {
-                    amount_max: p.machine_defaults?.amount_max || null
-                };
-            });
+        // Frage beide Endpunkte gleichzeitig ab, um Zeit zu sparen
+        const [inventoryResponse, productDataResponse] = await Promise.all([
+            fetch(inventoryUrl, { headers: { 'Authorization': apiToken } }),
+            fetch(productDataUrl, { headers: { 'Authorization': apiToken } })
+        ]);
+
+        if (!inventoryResponse.ok || !productDataResponse.ok) {
+            throw new Error('API-Anfrage fehlgeschlagen.');
         }
 
-        // 2. Fetch inventory report (for current stock)
-        const inventoryUrl = `https://cloud.vendon.net/rest/v1.7.0/stats/inventoryReport?machine_id=${machineId}`;
-        const inventoryData = await fetchAPI(inventoryUrl);
+        const inventoryData = await inventoryResponse.json();
+        const productData = await productDataResponse.json();
 
-        // 3. Merge the data
-        const mergedData = inventoryData.result.map(item => {
-            const details = productDetails[item.product_name];
+        // 1. Erstelle eine Map mit den maximalen Kapazitäten für schnellen Zugriff
+        const productInfoMap = new Map();
+        if (productData && productData.result) {
+            productData.result.forEach(p => {
+                productInfoMap.set(p.name, {
+                    amount_max: p.machine_defaults?.amount_max
+                });
+            });
+        }
+        
+        // 2. Führe die Daten zusammen
+        const mergedData = inventoryData.result.map(inventoryItem => {
+            const productInfo = productInfoMap.get(inventoryItem.product_name);
+            
+            // Nimm den amount_max aus den Produktdaten. Wenn er dort nicht existiert,
+            // nimm den (meist veralteten) Wert aus dem inventoryReport oder setze 10 als finalen Fallback.
+            const final_amount_max = productInfo?.amount_max || inventoryItem.machine_defaults?.amount_max || 10;
+
             return {
-                name: item.product_name,
-                amount: item.amount,
-                amount_max: details ? details.amount_max : null
+                ...inventoryItem, // Übernehme alle Daten aus dem inventoryReport...
+                machine_defaults: { // ...aber überschreibe die machine_defaults mit dem korrekten Maximalwert.
+                    ...inventoryItem.machine_defaults,
+                    amount_max: final_amount_max
+                }
             };
         });
 
@@ -48,10 +57,7 @@ exports.handler = async function(event, context) {
         };
 
     } catch (error) {
-        console.error('Error in serverless function:', error);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ error: error.message })
-        };
+        console.error('Fehler in der Netlify-Funktion:', error);
+        return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
     }
 };
