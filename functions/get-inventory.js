@@ -1,73 +1,75 @@
 // functions/get-inventory.js
 exports.handler = async function(event, context) {
     // Diese Header sind die Lösung für das CORS-Problem. Sie erlauben den Zugriff von jeder Webseite.
+    // --> Diese Variable wird beibehalten.
     const corsHeaders = {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS' // Wichtig für manche Browser
     };
 
+    // Hinzugefügt, um Preflight-Requests korrekt zu behandeln (Best Practice)
+    if (event.httpMethod === 'OPTIONS') {
+        return {
+            statusCode: 204,
+            headers: corsHeaders,
+            body: ''
+        };
+    }
+
+    // Die Parameter- und Token-Logik wird beibehalten.
     const { machine_id } = event.queryStringParameters;
     const apiToken = process.env.API_TOKEN;
 
+    // Die Prüfung auf eine machine_id wird beibehalten.
     if (!machine_id) {
         return {
             statusCode: 400,
-            headers: corsHeaders, // Header hier hinzufügen
+            headers: corsHeaders,
             body: JSON.stringify({ error: 'Keine machine_id übergeben.' })
         };
     }
 
-    const inventoryUrl = `https://cloud.vendon.net/rest/v1.7.0/stats/inventoryReport?machine_id=${machine_id}`;
-    const productDataUrl = `https://cloud.vendon.net/rest/v1.7.0/stock?machine_id=${machine_id}`;
+    // === START DER ÄNDERUNG ===
+
+    // Die alten, falschen URLs werden entfernt.
+    // Stattdessen verwenden wir den einen, korrekten Endpunkt.
+    const vendonApiUrl = `https://cloud.vendon.net/rest/head/machine/${machine_id}/products`;
 
     try {
-        const [inventoryResponse, productDataResponse] = await Promise.all([
-            fetch(inventoryUrl, { headers: { 'Authorization': apiToken } }),
-            fetch(productDataUrl, { headers: { 'Authorization': apiToken } })
-        ]);
-
-        if (!inventoryResponse.ok || !productDataResponse.ok) {
-            throw new Error('API-Anfrage an Vendon fehlgeschlagen.');
-        }
-
-        const inventoryData = await inventoryResponse.json();
-        const productData = await productDataResponse.json();
-
-        const productInfoMap = new Map();
-        if (productData && productData.result) {
-            productData.result.forEach(p => {
-                productInfoMap.set(p.name, {
-                    amount_max: p.machine_defaults?.amount_max
-                });
-            });
-        }
-        
-        const mergedData = inventoryData.result.map(inventoryItem => {
-            const productInfo = productInfoMap.get(inventoryItem.product_name);
-            const final_amount_max = productInfo?.amount_max || inventoryItem.machine_defaults?.amount_max || 10;
-
-            return {
-                ...inventoryItem,
-                machine_defaults: {
-                    ...inventoryItem.machine_defaults,
-                    amount_max: final_amount_max
-                }
-            };
+        // Der komplexe "Promise.all"-Aufruf mit zwei Anfragen wird durch eine einzige,
+        // gezielte Anfrage ersetzt.
+        const response = await fetch(vendonApiUrl, {
+            headers: { 'Authorization': apiToken } 
         });
 
-        // Erfolgreiche Antwort
+        // Eine robustere Fehlerprüfung für die API-Antwort.
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`API-Anfrage an Vendon fehlgeschlagen. Status: ${response.status} - ${errorText}`);
+        }
+
+        const data = await response.json();
+
+        // Die komplizierte Zusammenführung der Daten ("productInfoMap", "mergedData") ist nicht mehr nötig.
+        // Wir können das Ergebnis direkt durchreichen, da es bereits korrekt gefiltert ist.
+        const machineSpecificInventory = data.result || [];
+        
+        // Erfolgreiche Antwort mit den korrekten Daten.
         return {
             statusCode: 200,
-            headers: corsHeaders, // Header hier hinzufügen
-            body: JSON.stringify(mergedData)
+            headers: corsHeaders,
+            body: JSON.stringify(machineSpecificInventory)
         };
+
+    // === ENDE DER ÄNDERUNG ===
 
     } catch (error) {
         console.error('Fehler in der Netlify-Funktion:', error);
-        // Fehler-Antwort
+        // Die Fehlerbehandlung wird beibehalten, gibt jetzt aber spezifischere Fehler aus.
         return {
             statusCode: 500,
-            headers: corsHeaders, // Header hier hinzufügen
+            headers: corsHeaders,
             body: JSON.stringify({ error: error.message })
         };
     }
